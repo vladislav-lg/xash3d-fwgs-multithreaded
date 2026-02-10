@@ -202,6 +202,11 @@ def build(bld):
 	libs = ['engine_includes', 'public', 'werror', 'backtrace', 'library_suffix', 'enkiTS']
 	includes = ['server', 'client', 'client/vgui', 'common/soundlib', 'platform']
 
+	# Enable threaded network I/O on supported platforms
+	net_thread_defines = []
+	if bld.env.DEST_OS not in ['psvita', 'nswitch', 'dos', 'emscripten']:
+		net_thread_defines = ['XASH_NET_THREAD=1']
+
 	# basic build: dedicated only
 	source = bld.path.ant_glob(['common/*.c', 'common/imagelib/*.c', 'common/soundlib/*.c', 'server/*.c'])
 
@@ -259,15 +264,16 @@ def build(bld):
 		bld.program(
 			source = copy(source),
 			target = 'xash',
+			features = 'cxx c',
 			use = copy(libs),
 			includes = includes,
-			defines = 'XASH_ENABLE_MAIN=1 XASH_DEDICATED=1',
+			defines = ['XASH_ENABLE_MAIN=1', 'XASH_DEDICATED=1'] + net_thread_defines,
 			rpath = bld.env.DEFAULT_RPATH,
 			install_path = bld.env.BINDIR,
 		)
 
 	if bld.env.CLIENT:
-		defines = []
+		defines = [] + net_thread_defines
 		if bld.env.XASH_SDL:
 			libs += ['SDL%d' % bld.env.XASH_SDL]
 			source += bld.path.ant_glob(['platform/sdl%d/*.c' % bld.env.XASH_SDL])

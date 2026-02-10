@@ -21,6 +21,10 @@ GNU General Public License for more details.
 #include "net_ws_private.h"
 #include "server.h" // sv_cheats
 
+#ifdef XASH_NET_THREAD
+#include "net_thread.h"
+#endif
+
 #if XASH_SDL == 2
 #include <SDL_thread.h>
 #endif
@@ -148,6 +152,32 @@ static inline qboolean NET_IsSocketValid( int socket )
 #else
 	return socket >= 0;
 #endif
+}
+
+/*
+====================
+NET_GetIPSocket
+
+  Socket accessor for the network thread (net struct is static).
+  Returns net.ip_sockets[sock].
+====================
+*/
+int NET_GetIPSocket( netsrc_t sock )
+{
+	return net.ip_sockets[sock];
+}
+
+/*
+====================
+NET_GetIP6Socket
+
+  Socket accessor for the network thread (net struct is static).
+  Returns net.ip6_sockets[sock].
+====================
+*/
+int NET_GetIP6Socket( netsrc_t sock )
+{
+	return net.ip6_sockets[sock];
 }
 
 void NET_NetadrToIP6Bytes( uint8_t *ip6, const netadr_t *adr )
@@ -1340,6 +1370,26 @@ static qboolean NET_QueuePacket( netsrc_t sock, netadr_t *from, byte *data, size
 
 	*length = 0;
 
+#ifdef XASH_NET_THREAD
+	if( NetThread_IsActive() )
+	{
+		if( NetThread_RecvPacket( sock, from, data, length ))
+		{
+#if !XASH_DEDICATED
+			// check for split message
+			if( sock == NS_CLIENT && *(int *)data == NET_HEADER_SPLITPACKET )
+				return NET_GetLong( data, (int)*length, length, CL_GetSplitSize(), CL_Protocol() );
+#endif
+			// lag the packet, if needed
+			return NET_LagPacket( true, sock, from, length, data );
+		}
+
+		*length = 0;
+		return NET_LagPacket( false, sock, from, length, data );
+	}
+#endif /* XASH_NET_THREAD */
+
+	// Original recvfrom() path as fallback when threading disabled
 	for( protocol = 0; protocol < 2; protocol++ )
 	{
 		switch( protocol )
@@ -1503,12 +1553,24 @@ void NET_SendPacketEx( netsrc_t sock, size_t length, const void *data, netadr_t 
 	SOCKET		net_socket = 0;
 	netadrtype_t type = NET_NetadrType( &to );
 
+	// Loopback still handled on main thread (no socket involved)
 	if( !net.initialized || type == NA_LOOPBACK )
 	{
 		NET_SendLoopPacket( sock, length, data, to );
 		return;
 	}
-	else if( type == NA_BROADCAST || type == NA_IP )
+
+#ifdef XASH_NET_THREAD
+	if( NetThread_IsActive() )
+	{
+		// Push to outbound queue -- sendto() happens on network thread
+		NetThread_SendPacket( sock, length, data, to, splitsize );
+		return;
+	}
+#endif /* XASH_NET_THREAD */
+
+	// Original sendto() path as fallback
+	if( type == NA_BROADCAST || type == NA_IP )
 	{
 		net_socket = net.ip_sockets[sock];
 		if( !NET_IsSocketValid( net_socket ))
@@ -1873,6 +1935,14 @@ void NET_Config( qboolean multiplayer, qboolean changeport )
 				Con_Printf( S_ERROR "Couldn't allocate IPv6 server_port\n" );
 		}
 
+#ifdef XASH_NET_THREAD
+		// Start network thread if not yet active, or update socket fds
+		if( !NetThread_IsActive() )
+			NetThread_Init();
+		else
+			NetThread_SocketsUpdated();
+#endif
+
 		// get our local address, if possible
 		if( bFirst )
 		{
@@ -1883,6 +1953,11 @@ void NET_Config( qboolean multiplayer, qboolean changeport )
 	else
 	{
 		int	i;
+
+#ifdef XASH_NET_THREAD
+		// Stop network thread BEFORE closing sockets
+		NetThread_Shutdown();
+#endif
 
 		// shut down any existing sockets
 		for( i = 0; i < NS_COUNT; i++ )
@@ -2095,6 +2170,11 @@ void NET_Shutdown( void )
 {
 	if( !net.initialized )
 		return;
+
+#ifdef XASH_NET_THREAD
+	// Shutdown network thread BEFORE closing sockets
+	NetThread_Shutdown();
+#endif
 
 	NET_ClearLagData( true, true );
 
