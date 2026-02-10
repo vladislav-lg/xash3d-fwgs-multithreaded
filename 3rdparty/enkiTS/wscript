@@ -1,0 +1,25 @@
+#! /usr/bin/env python
+# encoding: utf-8
+
+from waflib import Logs
+import os
+
+top = '.'
+
+def options(opt):
+	return
+
+def configure(conf):
+	return
+
+def build(bld):
+	source = ['enkiTS/src/TaskScheduler.cpp', 'enkiTS/src/TaskScheduler_c.cpp']
+	includes = ['enkiTS/src']
+
+	bld.stlib(
+		source   = source,
+		target   = 'enkiTS',
+		includes = includes,
+		export_includes = includes,
+		features = 'cxx',
+	)

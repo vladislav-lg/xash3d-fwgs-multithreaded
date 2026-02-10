@@ -105,6 +105,7 @@ SUBDIRS = [
 	Subproject('3rdparty/MultiEmulator',lambda x: x.env.CLIENT),
 #	Subproject('3rdparty/freevgui',     lambda x: x.env.CLIENT),
 	Subproject('stub/client',           lambda x: x.env.CLIENT),
+	Subproject('3rdparty/enkiTS'),
 	Subproject('game_launch',           lambda x: x.env.LAUNCHER),
 	Subproject('engine'), # keep latest for static linking
 

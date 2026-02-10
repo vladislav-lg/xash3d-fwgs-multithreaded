@@ -43,3 +43,6 @@
 [submodule "3rdparty/library_suffix"]
 	path = 3rdparty/library_suffix
 	url = https://github.com/FWGS/library-suffix.git
+[submodule "3rdparty/enkiTS/enkiTS"]
+	path = 3rdparty/enkiTS/enkiTS
+	url = https://github.com/dougbinks/enkiTS.git
