@@ -100,4 +100,22 @@ static inline socklen_t NET_SockAddrLen( const struct sockaddr_storage *addr )
 	}
 }
 
+static inline qboolean NET_IsSocketError( int retval )
+{
+#if XASH_WIN32 || XASH_DOS4GW
+	return retval == SOCKET_ERROR ? true : false;
+#else
+	return retval < 0 ? true : false;
+#endif
+}
+
+static inline qboolean NET_IsSocketValid( int socket )
+{
+#if XASH_WIN32 || XASH_DOS4GW
+	return socket != INVALID_SOCKET;
+#else
+	return socket >= 0;
+#endif
+}
+
 net_gai_state_t NET_StringToSockaddr( const char *s, struct sockaddr_storage *sadr, qboolean nonblocking, int family );

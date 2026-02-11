@@ -136,24 +136,6 @@ static CVAR_DEFINE_AUTO( net6_address, "0", FCVAR_PRIVILEGED|FCVAR_READ_ONLY, "c
 
 static void NET_ClearLagData( qboolean bClient, qboolean bServer );
 
-static inline qboolean NET_IsSocketError( int retval )
-{
-#if XASH_WIN32 || XASH_DOS4GW
-	return retval == SOCKET_ERROR ? true : false;
-#else
-	return retval < 0 ? true : false;
-#endif
-}
-
-static inline qboolean NET_IsSocketValid( int socket )
-{
-#if XASH_WIN32 || XASH_DOS4GW
-	return socket != INVALID_SOCKET;
-#else
-	return socket >= 0;
-#endif
-}
-
 /*
 ====================
 NET_GetIPSocket

@@ -13,6 +13,8 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 */
 
+#include "common.h"
+#include "client.h"
 #include <inttypes.h>
 #include <fcntl.h>
 #if !XASH_WIN32
@@ -20,8 +22,6 @@ GNU General Public License for more details.
 #else
 #include <io.h>
 #endif
-#include "common.h"
-#include "client.h"
 
 /*
 ==========================================================
