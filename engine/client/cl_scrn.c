@@ -958,6 +958,7 @@ void SCR_Init( void )
 	SCR_InstallParticlePalette ();
 	SCR_InitCinematic();
 	CL_InitNetgraph();
+	CL_InitThreadGraph();
 
 	if( host.allow_console && Sys_CheckParm( "-toconsole" ))
 		Cbuf_AddText( "toggleconsole\n" );

@@ -25,6 +25,12 @@ GNU General Public License for more details.
 
 #include <string.h>
 
+#if XASH_LINUX
+#include <time.h>
+#include <unistd.h>
+#include <sys/syscall.h>
+#endif
+
 /*
 =============================================================================
 
@@ -69,6 +75,20 @@ static struct
 	/* Counters for diagnostics */
 	volatile uint32_t	packets_dropped;
 
+	/* Per-socket, per-direction counters for the thread graph overlay.
+	   Written only by the owning thread (net thread or main thread). */
+	volatile uint32_t	inbound_received[NS_COUNT];	/* net thread: successful recvfrom */
+	volatile uint32_t	outbound_sent[NS_COUNT];	/* net thread: successful queue pop -> sendto */
+	volatile uint32_t	inbound_drops[NS_COUNT];	/* net thread: inbound queue full */
+	volatile uint32_t	outbound_drops[NS_COUNT];	/* main thread: outbound queue full */
+	volatile uint64_t	inbound_bytes[NS_COUNT];	/* net thread: sum of recv bytes */
+	volatile uint64_t	outbound_bytes[NS_COUNT];	/* net thread: sum of sent bytes */
+	volatile uint32_t	loop_iterations;		/* net thread: IO loop count */
+
+	/* Cumulative wall-time breakdown (seconds, written by net thread) */
+	volatile double		active_time;			/* net thread: time doing real work */
+	volatile double		idle_time;			/* net thread: time blocked in select */
+
 	/* Last inbound packet arrival time (per main-thread pop) */
 	double			last_packet_time;
 
@@ -80,6 +100,13 @@ static struct
 
 	/* Sequence number for split packets (network thread only) */
 	int			sequence_number;
+
+	/* Thread handle for CPU time measurement (captured in IOLoop) */
+#if XASH_WIN32
+	HANDLE			thread_handle;	/* duplicated real handle */
+#elif XASH_LINUX
+	pid_t			thread_tid;	/* Linux thread ID from gettid() */
+#endif
 } net_thread;
 
 /*
@@ -227,8 +254,18 @@ static void NetThread_IOLoop( void *pArgs )
 {
 	(void)pArgs;
 
+	/* Capture OS thread handle for CPU time measurement from main thread */
+#if XASH_WIN32
+	DuplicateHandle( GetCurrentProcess(), GetCurrentThread(),
+		GetCurrentProcess(), &net_thread.thread_handle,
+		THREAD_QUERY_INFORMATION, FALSE, 0 );
+#elif XASH_LINUX
+	net_thread.thread_tid = (pid_t)syscall( __NR_gettid );
+#endif
+
 	while( net_thread.running )
 	{
+		double		loop_start, select_end;
 		fd_set		fdset;
 		struct timeval	timeout;
 		int		max_fd = 0;
@@ -236,6 +273,9 @@ static void NetThread_IOLoop( void *pArgs )
 		int		ip4[NS_COUNT], ip6[NS_COUNT];
 		int		sockets[4]; /* up to 4 sockets to monitor */
 		int		num_sockets = 0;
+
+		net_thread.loop_iterations++;
+		loop_start = Sys_DoubleTime();
 
 		/* Cache current socket fds (may change via NetThread_SocketsUpdated) */
 		for( i = 0; i < NS_COUNT; i++ )
@@ -269,6 +309,8 @@ static void NetThread_IOLoop( void *pArgs )
 			timeout.tv_sec = 0;
 			timeout.tv_usec = 1000; /* 1ms */
 			select( 0, NULL, NULL, NULL, &timeout );
+			select_end = Sys_DoubleTime();
+			net_thread.idle_time += select_end - loop_start;
 			goto drain_outbound;
 		}
 
@@ -276,6 +318,8 @@ static void NetThread_IOLoop( void *pArgs )
 		timeout.tv_sec = 0;
 		timeout.tv_usec = 1000; /* 1ms */
 		ret = select( max_fd + 1, &fdset, NULL, NULL, &timeout );
+		select_end = Sys_DoubleTime();
+		net_thread.idle_time += select_end - loop_start;
 
 		if( ret > 0 )
 		{
@@ -317,15 +361,20 @@ static void NetThread_IOLoop( void *pArgs )
 					pkt.length = (size_t)recv_ret;
 					memcpy( pkt.data, buf, recv_ret );
 
-					/* Determine which netsrc_t this socket belongs to */
-					ns = NetThread_DetermineNetsrc( sock_fd, ip4, ip6 );
+				/* Determine which netsrc_t this socket belongs to */
+				ns = NetThread_DetermineNetsrc( sock_fd, ip4, ip6 );
 
-					/* Push into inbound SPSC queue */
-					if( !NetQueue_PushInbound( &net_thread.queues[ns].inbound, &pkt ))
-					{
-						/* Queue full, increment dropped counter */
-						net_thread.packets_dropped++;
-					}
+				/* Track received packet stats */
+				net_thread.inbound_received[ns]++;
+				net_thread.inbound_bytes[ns] += (uint64_t)recv_ret;
+
+				/* Push into inbound SPSC queue */
+				if( !NetQueue_PushInbound( &net_thread.queues[ns].inbound, &pkt ))
+				{
+					/* Queue full, increment dropped counter */
+					net_thread.packets_dropped++;
+					net_thread.inbound_drops[ns]++;
+				}
 				}
 			}
 		}
@@ -392,8 +441,15 @@ drain_outbound:
 				}
 
 				NetThread_SendFragment( net_socket, out.data, out.length, &dest_addr, NET_SockAddrLen( &dest_addr ), out.splitsize, out.sock );
+
+				/* Track sent packet stats */
+				net_thread.outbound_sent[i]++;
+				net_thread.outbound_bytes[i] += (uint64_t)out.length;
 			}
 		}
+
+		/* Accumulate active time (everything after select returned) */
+		net_thread.active_time += Sys_DoubleTime() - select_end;
 	}
 }
 
@@ -444,6 +500,20 @@ void NetThread_Init( void )
 	net_thread.packets_dropped = 0;
 	net_thread.last_packet_time = 0.0;
 	net_thread.sequence_number = 1;
+	net_thread.loop_iterations = 0;
+	net_thread.active_time = 0.0;
+	net_thread.idle_time = 0.0;
+
+	for( i = 0; i < NS_COUNT; i++ )
+	{
+		net_thread.inbound_received[i] = 0;
+		net_thread.outbound_sent[i] = 0;
+		net_thread.inbound_drops[i] = 0;
+		net_thread.outbound_drops[i] = 0;
+		net_thread.inbound_bytes[i] = 0;
+		net_thread.outbound_bytes[i] = 0;
+	}
+
 	net_thread.running = 1;
 
 	/* Create enkiTS scheduler with 1 task thread */
@@ -477,6 +547,15 @@ void NetThread_Shutdown( void )
 
 	/* Wait for the pinned task to complete (1ms select timeout ensures quick exit) */
 	enkiWaitForPinnedTask( net_thread.scheduler, net_thread.pinned_task );
+
+	/* Close duplicated thread handle */
+#if XASH_WIN32
+	if( net_thread.thread_handle )
+	{
+		CloseHandle( net_thread.thread_handle );
+		net_thread.thread_handle = NULL;
+	}
+#endif
 
 	/* Clean up enkiTS resources */
 	enkiDeletePinnedTask( net_thread.scheduler, net_thread.pinned_task );
@@ -559,6 +638,7 @@ void NetThread_SendPacket( netsrc_t sock, size_t length, const void *data, netad
 	{
 		/* Queue full, packet dropped */
 		net_thread.packets_dropped++;
+		net_thread.outbound_drops[sock]++;
 	}
 }
 
@@ -593,6 +673,101 @@ void NetThread_SocketsUpdated( void )
 		net_thread.ip_sockets[i] = NET_GetIPSocket( (netsrc_t)i );
 		net_thread.ip6_sockets[i] = NET_GetIP6Socket( (netsrc_t)i );
 	}
+}
+
+/*
+====================
+NetThread_QueryThreadCPUTime
+
+  Query the cumulative CPU time (kernel + user) for the network thread
+  using the OS thread handle captured at IOLoop start.
+  Returns seconds of CPU time, or -1.0 if not available.
+====================
+*/
+static double NetThread_QueryThreadCPUTime( void )
+{
+#if XASH_WIN32
+	FILETIME creation, exit, kernel, user;
+	ULARGE_INTEGER k, u;
+
+	if( !net_thread.thread_handle )
+		return -1.0;
+
+	if( !GetThreadTimes( net_thread.thread_handle, &creation, &exit, &kernel, &user ))
+		return -1.0;
+
+	k.LowPart  = kernel.dwLowDateTime;
+	k.HighPart  = kernel.dwHighDateTime;
+	u.LowPart  = user.dwLowDateTime;
+	u.HighPart  = user.dwHighDateTime;
+
+	/* FILETIME is in 100-nanosecond intervals */
+	return (double)( k.QuadPart + u.QuadPart ) * 1.0e-7;
+#elif XASH_LINUX
+	char path[64];
+	FILE *f;
+	unsigned long utime, stime;
+	long clk_tck;
+	int n;
+
+	if( net_thread.thread_tid <= 0 )
+		return -1.0;
+
+	Q_snprintf( path, sizeof( path ), "/proc/self/task/%d/stat", (int)net_thread.thread_tid );
+	f = fopen( path, "r" );
+	if( !f )
+		return -1.0;
+
+	/* Fields: pid (comm) state ... field 14=utime, field 15=stime */
+	n = fscanf( f, "%*d %*s %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %lu %lu",
+		&utime, &stime );
+	fclose( f );
+
+	if( n != 2 )
+		return -1.0;
+
+	clk_tck = sysconf( _SC_CLK_TCK );
+	if( clk_tck <= 0 )
+		clk_tck = 100;
+
+	return (double)( utime + stime ) / (double)clk_tck;
+#else
+	return -1.0;
+#endif
+}
+
+/*
+====================
+NetThread_GetStats
+
+  Snapshot all statistics into the provided struct.
+  Uses acquire-load semantics for queue counts; all volatile
+  uint32_t/uint64_t reads are naturally atomic on supported platforms.
+====================
+*/
+void NetThread_GetStats( net_thread_stats_t *stats )
+{
+	int i;
+
+	if( !stats )
+		return;
+
+	for( i = 0; i < NS_COUNT; i++ )
+	{
+		stats->inbound_count[i]    = NetQueue_CountInbound( &net_thread.queues[i].inbound );
+		stats->outbound_count[i]   = NetQueue_CountOutbound( &net_thread.queues[i].outbound );
+		stats->inbound_received[i] = net_thread.inbound_received[i];
+		stats->outbound_sent[i]    = net_thread.outbound_sent[i];
+		stats->inbound_drops[i]    = net_thread.inbound_drops[i];
+		stats->outbound_drops[i]   = net_thread.outbound_drops[i];
+		stats->inbound_bytes[i]    = net_thread.inbound_bytes[i];
+		stats->outbound_bytes[i]   = net_thread.outbound_bytes[i];
+	}
+
+	stats->loop_iterations = net_thread.loop_iterations;
+	stats->net_thread_cpu_time = NetThread_QueryThreadCPUTime();
+	stats->net_active_time = net_thread.active_time;
+	stats->net_idle_time = net_thread.idle_time;
 }
 
 #endif /* XASH_NET_THREAD */

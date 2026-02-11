@@ -986,6 +986,12 @@ void CL_InitNetgraph( void );
 void SCR_DrawNetGraph( void );
 
 //
+// cl_threadgraph.c
+//
+void CL_InitThreadGraph( void );
+void SCR_DrawThreadGraph( void );
+
+//
 // cl_view.c
 //
 

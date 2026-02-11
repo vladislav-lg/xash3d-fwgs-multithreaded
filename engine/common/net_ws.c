@@ -114,6 +114,7 @@ typedef struct
 } net_state_t;
 
 static net_state_t		net;
+static net_loopback_stats_t	net_loopback_stats;
 static CVAR_DEFINE_AUTO( net_address, "0", FCVAR_PRIVILEGED|FCVAR_READ_ONLY, "contain local address of current client" );
 static CVAR_DEFINE( net_ipname, "ip", "localhost", FCVAR_PRIVILEGED, "network ip address" );
 static CVAR_DEFINE( net_iphostport, "ip_hostport", "0", FCVAR_READ_ONLY, "network ip host port" );
@@ -988,6 +989,10 @@ static qboolean NET_GetLoopPacket( netsrc_t sock, netadr_t *from, byte *data, si
 	memcpy( data, loop->msgs[i].data, loop->msgs[i].datalen );
 	*length = loop->msgs[i].datalen;
 
+	// Track loopback recv stats
+	net_loopback_stats.packets_recv[sock]++;
+	net_loopback_stats.bytes_recv[sock] += loop->msgs[i].datalen;
+
 	memset( from, 0, sizeof( *from ));
 	NET_NetadrSetType( from, NA_LOOPBACK );
 
@@ -1011,6 +1016,10 @@ static void NET_SendLoopPacket( netsrc_t sock, size_t length, const void *data, 
 
 	memcpy( loop->msgs[i].data, data, length );
 	loop->msgs[i].datalen = length;
+
+	// Track loopback send stats
+	net_loopback_stats.packets_sent[sock]++;
+	net_loopback_stats.bytes_sent[sock] += length;
 }
 
 /*
@@ -1022,6 +1031,18 @@ static void NET_ClearLoopback( void )
 {
 	net.loopbacks[0].send = net.loopbacks[0].get = 0;
 	net.loopbacks[1].send = net.loopbacks[1].get = 0;
+	memset( &net_loopback_stats, 0, sizeof( net_loopback_stats ));
+}
+
+/*
+====================
+NET_GetLoopbackStats
+====================
+*/
+void NET_GetLoopbackStats( net_loopback_stats_t *stats )
+{
+	if( stats )
+		memcpy( stats, &net_loopback_stats, sizeof( *stats ));
 }
 
 /*

@@ -84,6 +84,17 @@ static inline qboolean NET_IsLocalAddress( netadr_t adr )
 
 void NET_GetLocalAddress( netadr_t *ip4, netadr_t *ip6 );
 
+// Loopback traffic statistics (main-thread only, no locking needed)
+typedef struct
+{
+	uint32_t	packets_sent[NS_COUNT];	// incremented in NET_SendLoopPacket
+	uint32_t	packets_recv[NS_COUNT];	// incremented in NET_GetLoopPacket
+	uint64_t	bytes_sent[NS_COUNT];
+	uint64_t	bytes_recv[NS_COUNT];
+} net_loopback_stats_t;
+
+void NET_GetLoopbackStats( net_loopback_stats_t *stats );
+
 #if !XASH_DEDICATED
 int CL_GetSplitSize( void );
 #endif

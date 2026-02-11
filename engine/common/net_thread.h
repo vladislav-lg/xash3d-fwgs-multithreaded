@@ -56,6 +56,39 @@ double	NetThread_GetLastPacketTime( void );
    (e.g. after NET_OpenIP re-entry on port/map change) */
 void	NetThread_SocketsUpdated( void );
 
+/* Statistics snapshot (all fields safe to read from main thread) */
+typedef struct
+{
+	/* Current queue fill levels (0 to NET_SPSC_QUEUE_SIZE-1) */
+	uint32_t	inbound_count[NS_COUNT];
+	uint32_t	outbound_count[NS_COUNT];
+
+	/* Cumulative packet counters (monotonically increasing) */
+	uint32_t	inbound_received[NS_COUNT];
+	uint32_t	outbound_sent[NS_COUNT];
+	uint32_t	inbound_drops[NS_COUNT];
+	uint32_t	outbound_drops[NS_COUNT];
+
+	/* Cumulative byte counters */
+	uint64_t	inbound_bytes[NS_COUNT];
+	uint64_t	outbound_bytes[NS_COUNT];
+
+	/* Network thread loop iteration counter */
+	uint32_t	loop_iterations;
+
+	/* Network thread cumulative CPU time in seconds (kernel + user).
+	   Queried from the main thread via OS thread handle.
+	   -1.0 if not available on this platform. */
+	double		net_thread_cpu_time;
+
+	/* Network thread wall-time breakdown (cumulative seconds) */
+	double		net_active_time;	/* time spent doing recv/send/queue work */
+	double		net_idle_time;		/* time spent blocked in select() */
+} net_thread_stats_t;
+
+/* Snapshot current stats into *stats (thread-safe, called from main thread) */
+void	NetThread_GetStats( net_thread_stats_t *stats );
+
 #endif /* XASH_NET_THREAD */
 
 #endif /* NET_THREAD_H */
