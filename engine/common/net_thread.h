@@ -56,6 +56,14 @@ double	NetThread_GetLastPacketTime( void );
    (e.g. after NET_OpenIP re-entry on port/map change) */
 void	NetThread_SocketsUpdated( void );
 
+/* Check the net_thread cvar and dynamically start/stop the thread.
+   Safe to call every frame from the main thread. */
+void	NetThread_CheckCvar( void );
+
+/* Returns true if there are residual inbound packets in the SPSC queue
+   for the given socket type (used to drain after dynamic shutdown). */
+qboolean	NetThread_HasPendingPackets( netsrc_t sock );
+
 /* Statistics snapshot (all fields safe to read from main thread) */
 typedef struct
 {

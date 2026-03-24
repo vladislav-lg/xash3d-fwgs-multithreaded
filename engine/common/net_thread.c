@@ -98,6 +98,9 @@ static struct
 	/* Is the thread active? */
 	qboolean		active;
 
+	/* Persistent cvar pointer for dynamic toggle */
+	convar_t		*cvar;
+
 	/* Sequence number for split packets (network thread only) */
 	int			sequence_number;
 
@@ -472,15 +475,16 @@ NetThread_Init
 void NetThread_Init( void )
 {
 	struct enkiTaskSchedulerConfig config;
-	convar_t *net_thread_cvar;
 	int i;
 
 	if( net_thread.active )
 		return;
 
-	/* Check cvar */
-	net_thread_cvar = Cvar_Get( "net_thread", "1", FCVAR_ARCHIVE, "enable threaded network I/O" );
-	if( !net_thread_cvar || net_thread_cvar->value == 0.0f )
+	/* Register/fetch cvar (persistent pointer for dynamic toggle) */
+	if( !net_thread.cvar )
+		net_thread.cvar = Cvar_Get( "net_thread", "1", FCVAR_ARCHIVE, "enable threaded network I/O (togglable at runtime)" );
+
+	if( !net_thread.cvar || net_thread.cvar->value == 0.0f )
 		return;
 
 	/* Initialize queues */
@@ -673,6 +677,68 @@ void NetThread_SocketsUpdated( void )
 		net_thread.ip_sockets[i] = NET_GetIPSocket( (netsrc_t)i );
 		net_thread.ip6_sockets[i] = NET_GetIP6Socket( (netsrc_t)i );
 	}
+}
+
+/*
+====================
+NetThread_CheckCvar
+
+  Called from the main thread (e.g. NET_GetPacket) to dynamically
+  start or stop the network thread based on the net_thread cvar.
+  When stopping, any remaining inbound packets are drained first
+  so no data is lost during the transition.
+====================
+*/
+void NetThread_CheckCvar( void )
+{
+	qboolean want_active;
+
+	/* Ensure cvar is registered (handles the case where CheckCvar
+	   is called before Init, e.g. on first frame) */
+	if( !net_thread.cvar )
+		net_thread.cvar = Cvar_Get( "net_thread", "1", FCVAR_ARCHIVE, "enable threaded network I/O (togglable at runtime)" );
+
+	if( !net_thread.cvar )
+		return;
+
+	want_active = ( net_thread.cvar->value != 0.0f );
+
+	if( want_active && !net_thread.active )
+	{
+		/* User toggled net_thread from 0 -> 1: start the thread */
+		NetThread_Init();
+	}
+	else if( !want_active && net_thread.active )
+	{
+		/* User toggled net_thread from 1 -> 0: stop the thread.
+		   NetThread_Shutdown waits for the pinned task to finish,
+		   so after this call the queues are quiescent.
+
+		   The SPSC queues survive shutdown (they're static), and
+		   NetThread_RecvPacket still works when !active.  We don't
+		   drain here — instead we set a flag so NET_QueuePacket in
+		   net_ws.c continues to pop remaining inbound packets on
+		   subsequent frames until the queues are empty. */
+		NetThread_Shutdown();
+	}
+}
+
+/*
+====================
+NetThread_HasPendingPackets
+
+  Returns true if the inbound SPSC queue for the given socket type
+  still has packets.  Used after dynamic shutdown (net_thread 0)
+  to let NET_QueuePacket drain residual packets before falling
+  through to the direct recvfrom path.
+====================
+*/
+qboolean NetThread_HasPendingPackets( netsrc_t sock )
+{
+	if( sock < 0 || sock >= NS_COUNT )
+		return false;
+
+	return !NetQueue_IsEmptyInbound( &net_thread.queues[sock].inbound );
 }
 
 /*

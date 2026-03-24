@@ -1374,7 +1374,7 @@ static qboolean NET_QueuePacket( netsrc_t sock, netadr_t *from, byte *data, size
 	*length = 0;
 
 #ifdef XASH_NET_THREAD
-	if( NetThread_IsActive() )
+	if( NetThread_IsActive() || NetThread_HasPendingPackets( sock ))
 	{
 		if( NetThread_RecvPacket( sock, from, data, length ))
 		{
@@ -1387,8 +1387,15 @@ static qboolean NET_QueuePacket( netsrc_t sock, netadr_t *from, byte *data, size
 			return NET_LagPacket( true, sock, from, length, data );
 		}
 
-		*length = 0;
-		return NET_LagPacket( false, sock, from, length, data );
+		// If thread is active, stay on the SPSC path (don't fall through to recvfrom)
+		if( NetThread_IsActive() )
+		{
+			*length = 0;
+			return NET_LagPacket( false, sock, from, length, data );
+		}
+
+		// Thread was shut down and queue is now empty -- fall through
+		// to the direct recvfrom() path from this point forward.
 	}
 #endif /* XASH_NET_THREAD */
 
@@ -1464,6 +1471,11 @@ qboolean NET_GetPacket( netsrc_t sock, netadr_t *from, byte *data, size_t *lengt
 {
 	if( !data || !length )
 		return false;
+
+#ifdef XASH_NET_THREAD
+	// Dynamically start/stop the network thread when net_thread cvar changes
+	NetThread_CheckCvar();
+#endif
 
 	NET_AdjustLag();
 
