@@ -992,6 +992,12 @@ void CL_InitThreadGraph( void );
 void SCR_DrawThreadGraph( void );
 
 //
+// cl_sndgraph.c
+//
+void CL_InitSndGraph( void );
+void SCR_DrawSndGraph( void );
+
+//
 // cl_view.c
 //
 

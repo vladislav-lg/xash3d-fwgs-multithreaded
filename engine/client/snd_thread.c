@@ -74,6 +74,21 @@ static struct
 	qboolean           active;      // is the thread active?
 	convar_t          *cvar;        // snd_threaded cvar pointer
 
+	/* Diagnostics counters (written by audio thread, read by main thread) */
+	volatile uint32_t  mix_iterations;    // cumulative mix loop count
+	volatile uint32_t  cmd_drops;         // cumulative command queue drops
+	volatile uint32_t  cmd_queue_peak;    // high water mark of queue fill
+	volatile int       active_channels;   // channels with volume last frame
+	volatile double    active_time;       // cumulative time doing mix work
+	volatile double    idle_time;         // cumulative time in condvar wait
+
+	/* Thread handle for CPU time measurement (captured in MixLoop) */
+#if XASH_WIN32
+	HANDLE             thread_handle;     // duplicated real handle
+#elif XASH_LINUX
+	pid_t              thread_tid;        // Linux thread ID from gettid()
+#endif
+
 	/* Platform sync: condition variable to wake audio thread */
 #if XASH_SDL == 2
 	SDL_mutex *mutex;
@@ -204,6 +219,7 @@ qboolean SndThread_QueueCommand( const sndcmd_t *cmd )
 	if( next == tail )
 	{
 		// queue full — drop command
+		snd_thread.cmd_drops++;
 		Con_DPrintf( S_WARN "SndThread: command queue full, dropping command %d\n", cmd->type );
 		return false;
 	}
@@ -218,6 +234,14 @@ qboolean SndThread_QueueCommand( const sndcmd_t *cmd )
 #endif
 
 	snd_cmdqueue.head = next;
+
+	// track peak queue fill
+	{
+		uint32_t fill = ( next - tail ) & SND_CMD_QUEUE_MASK;
+		if( fill > snd_thread.cmd_queue_peak )
+			snd_thread.cmd_queue_peak = fill;
+	}
+
 	return true;
 }
 
@@ -406,12 +430,82 @@ static void SndThread_ApplySnapshot( void )
 =============================================================================
 */
 
+/*
+====================
+SndThread_QueryThreadCPUTime
+
+  Query cumulative CPU time (kernel + user) for the audio thread.
+  Returns seconds, or -1.0 if not available.
+====================
+*/
+static double SndThread_QueryThreadCPUTime( void )
+{
+#if XASH_WIN32
+	FILETIME creation, exit, kernel, user;
+	ULARGE_INTEGER k, u;
+
+	if( !snd_thread.thread_handle )
+		return -1.0;
+
+	if( !GetThreadTimes( snd_thread.thread_handle, &creation, &exit, &kernel, &user ))
+		return -1.0;
+
+	k.LowPart = kernel.dwLowDateTime;
+	k.HighPart = kernel.dwHighDateTime;
+	u.LowPart = user.dwLowDateTime;
+	u.HighPart = user.dwHighDateTime;
+
+	return (double)( k.QuadPart + u.QuadPart ) * 1.0e-7;
+#elif XASH_LINUX
+	char path[64];
+	FILE *f;
+	unsigned long utime, stime;
+	long clk_tck;
+
+	if( snd_thread.thread_tid <= 0 )
+		return -1.0;
+
+	Q_snprintf( path, sizeof( path ), "/proc/self/task/%d/stat", (int)snd_thread.thread_tid );
+	f = fopen( path, "r" );
+	if( !f ) return -1.0;
+
+	// Fields: pid (comm) state ... utime(14) stime(15)
+	if( fscanf( f, "%*d %*s %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %lu %lu",
+		&utime, &stime ) != 2 )
+	{
+		fclose( f );
+		return -1.0;
+	}
+	fclose( f );
+
+	clk_tck = sysconf( _SC_CLK_TCK );
+	if( clk_tck <= 0 ) clk_tck = 100;
+
+	return (double)( utime + stime ) / (double)clk_tck;
+#else
+	return -1.0;
+#endif
+}
+
 static void SndThread_MixLoop( void *pArgs )
 {
+	double mix_start, mix_end, idle_start, idle_end;
+
 	(void)pArgs;
+
+	/* Capture OS thread handle for CPU time measurement */
+#if XASH_WIN32
+	DuplicateHandle( GetCurrentProcess(), GetCurrentThread(),
+		GetCurrentProcess(), &snd_thread.thread_handle,
+		0, FALSE, DUPLICATE_SAME_ACCESS );
+#elif XASH_LINUX
+	snd_thread.thread_tid = (pid_t)syscall( SYS_gettid );
+#endif
 
 	while( snd_thread.running )
 	{
+		mix_start = Sys_DoubleTime();
+
 		/* 1. Process queued commands from main thread */
 		SndThread_ProcessCommands();
 
@@ -427,16 +521,19 @@ static void SndThread_MixLoop( void *pArgs )
 		/* 5. Update ambient sounds */
 		S_UpdateAmbientSounds();
 
-		/* 6. Spatialize all channels */
+		/* 6. Spatialize all channels + count active */
 		{
-			int i;
+			int i, active = 0;
 			channel_t *ch;
 
 			for( i = NUM_AMBIENTS, ch = channels + NUM_AMBIENTS; i < total_channels; i++, ch++ )
 			{
 				if( !ch->sfx ) continue;
 				SND_Spatialize( ch );
+				if( ch->leftvol || ch->rightvol )
+					active++;
 			}
+			snd_thread.active_channels = active;
 		}
 
 		/* 7. Spatialize raw channels */
@@ -448,12 +545,28 @@ static void SndThread_MixLoop( void *pArgs )
 		/* 9. Mix and submit to DMA */
 		S_UpdateChannels();
 
+		mix_end = Sys_DoubleTime();
+		snd_thread.active_time += ( mix_end - mix_start );
+		snd_thread.mix_iterations++;
+
 		/* 10. Sleep until next wake or ~5ms timeout */
+		idle_start = Sys_DoubleTime();
 		SndThread_SyncLock();
 		if( snd_thread.running )
 			SndThread_SyncWait();
 		SndThread_SyncUnlock();
+		idle_end = Sys_DoubleTime();
+		snd_thread.idle_time += ( idle_end - idle_start );
 	}
+
+	/* Clean up thread handle */
+#if XASH_WIN32
+	if( snd_thread.thread_handle )
+	{
+		CloseHandle( snd_thread.thread_handle );
+		snd_thread.thread_handle = NULL;
+	}
+#endif
 }
 
 /*
@@ -486,6 +599,19 @@ void SndThread_Init( void )
 	/* Initialize snapshots */
 	memset( snd_snapshots, 0, sizeof( snd_snapshots ));
 	snd_snapshot_index = 0;
+
+	/* Reset diagnostics counters */
+	snd_thread.mix_iterations = 0;
+	snd_thread.cmd_drops = 0;
+	snd_thread.cmd_queue_peak = 0;
+	snd_thread.active_channels = 0;
+	snd_thread.active_time = 0.0;
+	snd_thread.idle_time = 0.0;
+#if XASH_WIN32
+	snd_thread.thread_handle = NULL;
+#elif XASH_LINUX
+	snd_thread.thread_tid = 0;
+#endif
 
 	/* Initialize sync primitives */
 	SndThread_SyncInit();
@@ -551,6 +677,31 @@ void SndThread_CheckCvar( void )
 		SndThread_Shutdown();
 }
 
+void SndThread_GetStats( snd_thread_stats_t *stats )
+{
+	uint32_t head, tail;
+
+	if( !stats ) return;
+	memset( stats, 0, sizeof( *stats ));
+
+	if( !snd_thread.active )
+		return;
+
+	head = snd_cmdqueue.head;
+	tail = snd_cmdqueue.tail;
+	stats->cmd_queue_count = ( head - tail ) & SND_CMD_QUEUE_MASK;
+	stats->cmd_queue_peak = snd_thread.cmd_queue_peak;
+	stats->cmd_drops = snd_thread.cmd_drops;
+	stats->mix_iterations = snd_thread.mix_iterations;
+	stats->active_time = snd_thread.active_time;
+	stats->idle_time = snd_thread.idle_time;
+	stats->active_channels = snd_thread.active_channels;
+	stats->total_channels_snap = total_channels;
+	stats->paintedtime_snap = paintedtime;
+	stats->soundtime_snap = soundtime;
+	stats->snd_thread_cpu_time = SndThread_QueryThreadCPUTime();
+}
+
 #else // !XASH_NET_THREAD
 
 /*
@@ -568,5 +719,6 @@ qboolean SndThread_QueueCommand( const sndcmd_t *cmd ) { (void)cmd; return false
 void     SndThread_UpdateSnapshot( void ) {}
 void     SndThread_Signal( void ) {}
 const snd_snapshot_t *SndThread_GetSnapshot( void ) { return NULL; }
+void     SndThread_GetStats( snd_thread_stats_t *stats ) { if( stats ) memset( stats, 0, sizeof( *stats )); }
 
 #endif // XASH_NET_THREAD

@@ -181,4 +181,26 @@ void     SndThread_Signal( void );
 /* Get the current snapshot (called from audio thread) */
 const snd_snapshot_t *SndThread_GetSnapshot( void );
 
+/*
+  Statistics snapshot — all fields safe to read from main thread.
+  Used by cl_sndgraph.c debug overlay.
+*/
+typedef struct
+{
+	uint32_t cmd_queue_count;      // current fill level (head - tail)
+	uint32_t cmd_queue_peak;       // high water mark since init
+	uint32_t cmd_drops;            // cumulative command drops
+	uint32_t mix_iterations;       // cumulative mix loop count
+	double   active_time;          // cumulative time doing mix work (seconds)
+	double   idle_time;            // cumulative time in condvar wait (seconds)
+	int      active_channels;      // channels with non-zero volume last frame
+	int      total_channels_snap;  // total_channels value
+	int      paintedtime_snap;     // current paintedtime
+	int      soundtime_snap;       // current soundtime
+	double   snd_thread_cpu_time;  // OS thread CPU seconds (-1.0 if N/A)
+} snd_thread_stats_t;
+
+/* Snapshot current stats (thread-safe, called from main thread) */
+void SndThread_GetStats( snd_thread_stats_t *stats );
+
 #endif // SND_THREAD_H
