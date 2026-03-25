@@ -16,6 +16,18 @@ GNU General Public License for more details.
 #include "common.h"
 #include "sound.h"
 #include "client.h"
+#include "snd_thread.h"
+
+// Helper: get current key_dest, using snapshot when audio thread is active
+static int SND_GetKeyDest( void )
+{
+	if( SndThread_IsActive() )
+	{
+		const snd_snapshot_t *snap = SndThread_GetSnapshot();
+		if( snap ) return snap->key_dest;
+	}
+	return cls.key_dest;
+}
 
 enum
 {
@@ -556,7 +568,7 @@ static void MIX_MixChannelsToPaintbuffer( int endtime, int rate, int outputRate 
 		// NOTE: background map is allow both type sounds: menu and game
 		if( !cl.background )
 		{
-			if( cls.key_dest == key_console && ch->localsound )
+			if( SND_GetKeyDest() == key_console && ch->localsound )
 			{
 				// play, playvol
 			}
@@ -571,7 +583,7 @@ static void MIX_MixChannelsToPaintbuffer( int endtime, int rate, int outputRate 
 				continue;
 			}
 		}
-		else if( cls.key_dest == key_console )
+		else if( SND_GetKeyDest() == key_console )
 			continue;	// silent mode in console
 
 		pSource = S_LoadSound( ch->sfx );
@@ -864,7 +876,7 @@ void MIX_PaintChannels( int endtime )
 		MIX_UpsampleAllPaintbuffers( end, count );
 
 		// process all sounds with DSP
-		if( cls.key_dest != key_menu )
+		if( SND_GetKeyDest() != key_menu )
 			DSP_Process( MIX_GetPFrontFromIPaint( IROOMBUFFER ), count );
 
 		// add music or soundtrack from movie (no dsp)

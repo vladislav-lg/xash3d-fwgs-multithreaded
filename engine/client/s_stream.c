@@ -17,6 +17,18 @@ GNU General Public License for more details.
 #include "sound.h"
 #include "client.h"
 #include "soundlib.h"
+#include "snd_thread.h"
+
+// Helper: get current key_dest, using snapshot when audio thread is active
+static int SND_StreamGetKeyDest( void )
+{
+	if( SndThread_IsActive() )
+	{
+		const snd_snapshot_t *snap = SndThread_GetSnapshot();
+		if( snap ) return snap->key_dest;
+	}
+	return cls.key_dest;
+}
 
 static bg_track_t		s_bgTrack;
 static musicfade_t		musicfade;	// controlled by game dlls
@@ -106,7 +118,7 @@ void S_StartBackgroundTrack( const char *introTrack, const char *mainTrack, int 
 
 	Q_strncpy( s_bgTrack.current, introTrack, sizeof( s_bgTrack.current ));
 	memset( &musicfade, 0, sizeof( musicfade )); // clear any soundfade
-	s_bgTrack.source = cls.key_dest;
+	s_bgTrack.source = SND_StreamGetKeyDest();
 
 	if( position != 0 )
 	{
@@ -197,10 +209,10 @@ void S_StreamBackgroundTrack( void )
 	if( !cl.background )
 	{
 		// pause music by source type
-		if( s_bgTrack.source == key_game && cls.key_dest == key_menu ) return;
-		if( s_bgTrack.source == key_menu && cls.key_dest != key_menu ) return;
+		if( s_bgTrack.source == key_game && SND_StreamGetKeyDest() == key_menu ) return;
+		if( s_bgTrack.source == key_menu && SND_StreamGetKeyDest() != key_menu ) return;
 	}
-	else if( cls.key_dest == key_console )
+	else if( SND_StreamGetKeyDest() == key_console )
 		return;
 
 	ch = S_FindRawChannel( S_RAW_SOUND_BACKGROUNDTRACK, true );

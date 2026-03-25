@@ -207,6 +207,15 @@ float S_GetMusicVolume( void );
 // s_main.c
 //
 void S_FreeChannel( channel_t *ch );
+void S_UpdateSoundFade( void );
+void S_FreeIdleRawChannels( void );
+void S_UpdateAmbientSounds( void );
+void S_SpatializeRawChannels( void );
+void S_InitAmbientChannels( void );
+void S_ClearBuffer( void );
+void S_UpdateChannels( void );
+int  S_AlterChannel( int entnum, int channel, sfx_t *sfx, int vol, int pitch, int flags );
+void SND_Spatialize( channel_t *ch );
 
 //
 // s_mix.c

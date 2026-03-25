@@ -19,6 +19,7 @@ GNU General Public License for more details.
 #include "con_nprint.h"
 #include "pm_local.h"
 #include "platform/platform.h"
+#include "snd_thread.h"
 
 dma_t		dma;
 poolhandle_t sndpool;
@@ -128,7 +129,7 @@ void S_FreeChannel( channel_t *ch )
 S_UpdateSoundFade
 =================
 */
-static void S_UpdateSoundFade( void )
+void S_UpdateSoundFade( void )
 {
 	float	f, totaltime, elapsed;
 
@@ -403,7 +404,7 @@ returns TRUE if sound was altered,
 returns FALSE if sound was not found (sound is not playing)
 =================
 */
-static int S_AlterChannel( int entnum, int channel, sfx_t *sfx, int vol, int pitch, int flags )
+int S_AlterChannel( int entnum, int channel, sfx_t *sfx, int vol, int pitch, int flags )
 {
 	channel_t	*ch;
 	int	i;
@@ -481,7 +482,7 @@ static void S_SpatializeChannel( int *left_vol, int *right_vol, int master_vol, 
 SND_Spatialize
 =================
 */
-static void SND_Spatialize( channel_t *ch )
+void SND_Spatialize( channel_t *ch )
 {
 	// anything coming from the view entity will allways be full volume
 	if( S_IsClient( ch->entnum ))
@@ -951,7 +952,7 @@ int S_GetCurrentDynamicSounds( soundlist_t *pout, int size )
 S_InitAmbientChannels
 ===================
 */
-static void S_InitAmbientChannels( void )
+void S_InitAmbientChannels( void )
 {
 	int	ambient_channel;
 	channel_t	*chan;
@@ -973,7 +974,7 @@ static void S_InitAmbientChannels( void )
 S_UpdateAmbientSounds
 ===================
 */
-static void S_UpdateAmbientSounds( void )
+void S_UpdateAmbientSounds( void )
 {
 	int ambient_channel;
 
@@ -1198,7 +1199,7 @@ S_FreeIdleRawChannels
 Free raw channel that have been idling for too long.
 ===================
 */
-static void S_FreeIdleRawChannels( void )
+void S_FreeIdleRawChannels( void )
 {
 	int	i;
 
@@ -1252,7 +1253,7 @@ static void S_ClearRawChannels( void )
 S_SpatializeRawChannels
 ===================
 */
-static void S_SpatializeRawChannels( void )
+void S_SpatializeRawChannels( void )
 {
 	for( int i = 0; i < MAX_RAW_CHANNELS; i++ )
 	{
@@ -1325,7 +1326,7 @@ static void S_FreeRawChannels( void )
 S_ClearBuffer
 ==================
 */
-static void S_ClearBuffer( void )
+void S_ClearBuffer( void )
 {
 	S_ClearRawChannels();
 
@@ -1424,7 +1425,7 @@ static int S_GetSoundtime( void )
 }
 
 //=============================================================================
-static void S_UpdateChannels( void )
+void S_UpdateChannels( void )
 {
 	uint	endtime;
 	int	samps;
@@ -1467,6 +1468,10 @@ Don't let sound skip if going slow
 void S_ExtraUpdate( void )
 {
 	if( !dma.initialized ) return;
+
+	// When threaded, mixing happens on the audio thread — no need for extra updates
+	if( SndThread_IsActive() ) return;
+
 	S_UpdateChannels ();
 }
 
@@ -1501,6 +1506,29 @@ void SND_UpdateSound( void )
 	con_nprint_t	info;
 
 	if( !dma.initialized ) return;
+
+	// When the audio thread is active, the main thread only updates
+	// the listener snapshot and signals the thread to wake up.
+	// All mixing, spatialization, and streaming happen on the audio thread.
+	if( SndThread_IsActive() )
+	{
+		// Update listener state for the snapshot
+		s_listener.frametime = (cl.time - cl.oldtime);
+		s_listener.waterlevel = cl.local.waterlevel;
+		s_listener.active = CL_IsInGame();
+		s_listener.inmenu = cls.key_dest == key_menu;
+		s_listener.paused = cl.paused;
+
+		// Write snapshot and signal audio thread
+		SndThread_UpdateSnapshot();
+		SndThread_Signal();
+
+		// Check for dynamic toggle
+		SndThread_CheckCvar();
+		return;
+	}
+
+	// --- Synchronous (non-threaded) path below ---
 
 	// if the loading plaque is up, clear everything
 	// out to make sure we aren't looping a dirty
@@ -1884,6 +1912,9 @@ qboolean S_Init( void )
 	S_InitSounds ();
 	VOX_Init ();
 
+	// Start the dedicated audio mixing thread (if enabled via snd_threaded cvar)
+	SndThread_Init();
+
 	return true;
 }
 
@@ -1893,6 +1924,9 @@ qboolean S_Init( void )
 void S_Shutdown( void )
 {
 	if( !dma.initialized ) return;
+
+	// Shut down audio thread before tearing down sound resources
+	SndThread_Shutdown();
 
 	Cmd_RemoveCommand( "play" );
 	Cmd_RemoveCommand( "playvol" );
